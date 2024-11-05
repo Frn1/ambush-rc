@@ -122,13 +122,13 @@ void dumpKeyboard(ControllerPtr ctl) {
     Console.printf("idx=%d, Pressed keys: ", ctl->index());
     for (int key = Keyboard_A; key <= Keyboard_UpArrow; key++) {
         if (ctl->isKeyPressed(static_cast<KeyboardKey>(key))) {
-            const char* keyName = key_names[key-4];
+            const char* keyName = key_names[key - 4];
             Console.printf("%s,", keyName);
-       }
+        }
     }
     for (int key = Keyboard_LeftControl; key <= Keyboard_RightMeta; key++) {
         if (ctl->isKeyPressed(static_cast<KeyboardKey>(key))) {
-            const char* keyName = modifier_names[key-0xe0];
+            const char* keyName = modifier_names[key - 0xe0];
             Console.printf("%s,", keyName);
         }
     }
@@ -146,107 +146,113 @@ void dumpBalanceBoard(ControllerPtr ctl) {
     );
 }
 
-void processGamepad(ControllerPtr ctl) {
-    // There are different ways to query whether a button is pressed.
-    // By query each button individually:
-    //  a(), b(), x(), y(), l1(), etc...
-    if (ctl->a()) {
-        static int colorIdx = 0;
-        // Some gamepads like DS4 and DualSense support changing the color LED.
-        // It is possible to change it by calling:
-        switch (colorIdx % 3) {
-            case 0:
-                // Red
-                ctl->setColorLED(255, 0, 0);
+template <typename T>
+T betterMap(const T x, const T in_min, const T in_max, const T out_min, const T out_max) {
+    return (x - in_min) * (out_max - out_min) / (in_max - in_min) + out_min;
+}
+
+template <typename T, typename O>
+O linearInterpolation(const T x, const T* x_values, const O* y_values, size_t len) {
+    size_t start_index = 0;
+    size_t end_index = 1;
+
+    for (size_t i = 1; i < len - 1; i++) {
+        if (x >= x_values[i]) {
+            if (x < x_values[i + 1]) {
+                start_index = i;
+                end_index = i + 1;
                 break;
-            case 1:
-                // Green
-                ctl->setColorLED(0, 255, 0);
-                break;
-            case 2:
-                // Blue
-                ctl->setColorLED(0, 0, 255);
-                break;
+            }
         }
-        colorIdx++;
     }
 
-    if (ctl->b()) {
-        // Turn on the 4 LED. Each bit represents one LED.
-        static int led = 0;
-        led++;
-        // Some gamepads like the DS3, DualSense, Nintendo Wii, Nintendo Switch
-        // support changing the "Player LEDs": those 4 LEDs that usually indicate
-        // the "gamepad seat".
-        // It is possible to change them by calling:
-        ctl->setPlayerLEDs(led & 0x0f);
-    }
-
-    if (ctl->x()) {
-        // Some gamepads like DS3, DS4, DualSense, Switch, Xbox One S, Stadia support rumble.
-        // It is possible to set it by calling:
-        // Some controllers have two motors: "strong motor", "weak motor".
-        // It is possible to control them independently.
-        ctl->playDualRumble(0 /* delayedStartMs */, 250 /* durationMs */, 0x80 /* weakMagnitude */,
-                            0x40 /* strongMagnitude */);
-    }
-
-    // Another way to query controller data is by getting the buttons() function.
-    // See how the different "dump*" functions dump the Controller info.
-    dumpGamepad(ctl);
-
-    // See ArduinoController.h for all the available functions.
+    return betterMap(x, x_values[start_index], x_values[end_index], y_values[start_index], y_values[end_index]);
 }
 
-void processMouse(ControllerPtr ctl) {
-    // This is just an example.
-    if (ctl->scrollWheel() > 0) {
-        // Do Something
-    } else if (ctl->scrollWheel() < 0) {
-        // Do something else
+struct MotorSpeeds {
+    uint8_t left_speed;
+    bool left_forward;
+    uint8_t right_speed;
+    bool right_forward;
+};
+
+struct MotorSpeeds calculateMotorSpeeds(int8_t x, int8_t y) {
+    constexpr float left_x_values[] = {-PI, -PI / 2, 0, PI / 2, PI};
+    constexpr float left_y_values[] = {0, -1, 1, 1, 0};
+    constexpr float right_x_values[] = {-PI, -PI / 2, 0, PI / 2, PI};
+    constexpr float right_y_values[] = {1, -1, 0, 1, 1};
+
+    float angle = atan2f(y, x);
+    float magnitude = constrain(sqrt(x * x + y * y), 0.0, 500.0) / 500.0;
+
+    Serial.printf("%f\t%f\n", angle, magnitude);
+
+    float left_speed = linearInterpolation(angle, left_x_values, left_y_values, sizeof(left_x_values) / sizeof(float));
+    bool left_forward = true;
+    if (left_speed < 0) {
+        left_speed = abs(left_speed);
+        left_forward = false;
     }
 
-    // See "dumpMouse" for possible things to query.
-    dumpMouse(ctl);
+    float right_speed =
+        linearInterpolation(angle, right_x_values, right_y_values, sizeof(right_x_values) / sizeof(float));
+    bool right_forward = true;
+    if (right_speed < 0) {
+        right_speed = abs(right_speed);
+        right_forward = false;
+    }
+
+    struct MotorSpeeds result = {
+        (uint8_t)(uint8_t)round(left_speed * magnitude * 255.0),
+        left_forward,
+        (uint8_t)round(right_speed * magnitude * 255.0),
+        right_forward,
+    };
+    return result;
 }
 
-void processKeyboard(ControllerPtr ctl) {
+constexpr uint8_t PINS_MOTOR_LEFT_FORWARD = 25;
+constexpr uint8_t PINS_MOTOR_LEFT_BACKWARD = 26;
+constexpr uint8_t PINS_MOTOR_RIGHT_BACKWARD = 33;
+constexpr uint8_t PINS_MOTOR_RIGHT_FORWARD = 32;
 
-    if (!ctl->isAnyKeyPressed())
-        return;
+void updateMotors(int32_t x, int32_t y) {
+    struct MotorSpeeds motor_speeds = calculateMotorSpeeds(x, y);
 
-    // This is just an example.
-    if (ctl->isKeyPressed(Keyboard_A)) {
-        // Do Something
-        Console.println("Key 'A' pressed");
+    if (motor_speeds.left_forward) {
+        analogWrite(PINS_MOTOR_LEFT_FORWARD, motor_speeds.left_speed);
+        analogWrite(PINS_MOTOR_LEFT_BACKWARD, 0);
+    } else {
+        analogWrite(PINS_MOTOR_LEFT_FORWARD, 0);
+        analogWrite(PINS_MOTOR_LEFT_BACKWARD, motor_speeds.left_speed);
     }
 
-    // Don't do "else" here.
-    // Multiple keys can be pressed at the same time.
-    if (ctl->isKeyPressed(Keyboard_LeftShift)) {
-        // Do something else
-        Console.println("Key 'LEFT SHIFT' pressed");
+    if (motor_speeds.right_forward) {
+        analogWrite(PINS_MOTOR_RIGHT_FORWARD, motor_speeds.right_speed);
+        analogWrite(PINS_MOTOR_RIGHT_BACKWARD, 0);
+    } else {
+        analogWrite(PINS_MOTOR_RIGHT_FORWARD, 0);
+        analogWrite(PINS_MOTOR_RIGHT_BACKWARD, motor_speeds.right_speed);
     }
+}
 
-    // Don't do "else" here.
-    // Multiple keys can be pressed at the same time.
-    if (ctl->isKeyPressed(Keyboard_LeftArrow)) {
-        // Do something else
-        Console.println("Key 'Left Arrow' pressed");
-    }
+void processGamepad(ControllerPtr ctl) {
+    int32_t x = ctl->axisX();
+    int32_t y = ctl->axisY();
 
-    // See "dumpKeyboard" for possible things to query.
-    dumpKeyboard(ctl);
+    updateMotors(x, y);
 }
 
 void processBalanceBoard(ControllerPtr ctl) {
-    // This is just an example.
-    if (ctl->topLeft() > 10000) {
-        // Do Something
-    }
+    uint16_t tl = ctl->topLeft();
+    uint16_t tr = ctl->topRight();
+    uint16_t bl = ctl->bottomLeft();
+    uint16_t br = ctl->bottomRight();
 
-    // See "dumpBalanceBoard" for possible things to query.
-    dumpBalanceBoard(ctl);
+    int32_t x = (tr + br) - (tl + bl);
+    int32_t y = (tr + tl) - (br + bl);
+
+    updateMotors(x, y);
 }
 
 void processControllers() {
@@ -254,10 +260,6 @@ void processControllers() {
         if (myController && myController->isConnected() && myController->hasData()) {
             if (myController->isGamepad()) {
                 processGamepad(myController);
-            } else if (myController->isMouse()) {
-                processMouse(myController);
-            } else if (myController->isKeyboard()) {
-                processKeyboard(myController);
             } else if (myController->isBalanceBoard()) {
                 processBalanceBoard(myController);
             } else {
@@ -276,13 +278,6 @@ void setup() {
     // Setup the Bluepad32 callbacks
     BP32.setup(&onConnectedController, &onDisconnectedController);
 
-    // "forgetBluetoothKeys()" should be called when the user performs
-    // a "device factory reset", or similar.
-    // Calling "forgetBluetoothKeys" in setup() just as an example.
-    // Forgetting Bluetooth keys prevents "paired" gamepads to reconnect.
-    // But it might also fix some connection / re-connection issues.
-    BP32.forgetBluetoothKeys();
-
     // Enables mouse / touchpad support for gamepads that support them.
     // When enabled, controllers like DualSense and DualShock4 generate two connected devices:
     // - First one: the gamepad
@@ -293,7 +288,12 @@ void setup() {
     // Enables the BLE Service in Bluepad32.
     // This service allows clients, like a mobile app, to setup and see the state of Bluepad32.
     // By default, it is disabled.
-    BP32.enableBLEService(false);
+    BP32.enableBLEService(true);
+
+    pinMode(PINS_MOTOR_LEFT_BACKWARD, OUTPUT);
+    pinMode(PINS_MOTOR_LEFT_FORWARD, OUTPUT);
+    pinMode(PINS_MOTOR_RIGHT_BACKWARD, OUTPUT);
+    pinMode(PINS_MOTOR_RIGHT_FORWARD, OUTPUT);
 }
 
 // Arduino loop function. Runs in CPU 1.
@@ -309,7 +309,5 @@ void loop() {
     // If your main loop doesn't have one, just add a simple `vTaskDelay(1)`.
     // Detailed info here:
     // https://stackoverflow.com/questions/66278271/task-watchdog-got-triggered-the-tasks-did-not-reset-the-watchdog-in-time
-
-    //     vTaskDelay(1);
-    delay(150);
+    vTaskDelay(1);
 }
